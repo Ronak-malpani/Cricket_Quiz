@@ -1,0 +1,62 @@
+[
+  {
+    "category": "World Cups",
+    "question": "Who hit the iconic winning six off Sri Lanka to seal India's 2011 Cricket World Cup victory?",
+    "correct_answer": "MS Dhoni",
+    "incorrect_answers": ["Sachin Tendulkar", "Gautam Gambhir", "Yuvraj Singh"]
+  },
+  {
+    "category": "IPL Chaos",
+    "question": "Which batsman smashed an unbelievable 175* off just 66 balls in a 2013 IPL match?",
+    "correct_answer": "Chris Gayle",
+    "incorrect_answers": ["AB de Villiers", "Brendon McCullum", "Virat Kohli"]
+  },
+  {
+    "category": "Legendary Records",
+    "question": "Which English bowler was hit for 6 consecutive sixes in an over by Yuvraj Singh during the 2007 T20 World Cup?",
+    "correct_answer": "Stuart Broad",
+    "incorrect_answers": ["James Anderson", "Andrew Flintoff", "Chris Broad"]
+  },
+  {
+    "category": "World Cups",
+    "question": "Who holds the record for the highest individual score in a Men's ODI match with a monumental 264 runs?",
+    "correct_answer": "Rohit Sharma",
+    "incorrect_answers": ["Virender Sehwag", "Martin Guptill", "Chris Gayle"]
+  },
+  {
+    "category": "Legendary Records",
+    "question": "Who is the only bowler to take a hat-trick in all three formats of international cricket (Test, ODI, T20I)?",
+    "correct_answer": "Lasith Malinga",
+    "incorrect_answers": ["Trent Boult", "Rashid Khan", "Jasprit Bumrah"]
+  },
+  {
+    "category": "IPL Chaos",
+    "question": "Which franchise holds the joint-most Indian Premier League (IPL) titles?",
+    "correct_answer": "Mumbai Indians & Chennai Super Kings",
+    "incorrect_answers": ["Kolkata Knight Riders", "Royal Challengers Bengaluru", "Sunrisers Hyderabad"]
+  },
+  {
+    "category": "World Cups",
+    "question": "Who was named Player of the Tournament in the 2023 ICC Men's Cricket World Cup?",
+    "correct_answer": "Virat Kohli",
+    "incorrect_answers": ["Travis Head", "Rohit Sharma", "Glenn Maxwell"]
+  },
+  {
+    "category": "Legendary Records",
+    "question": "What is the maximum number of legal deliveries allowed in a standard over of international cricket?",
+    "correct_answer": "6",
+    "incorrect_answers": ["5", "8", "4"]
+  },
+  {
+    "category": "Test Cricket",
+    "question": "Who is the only batsman to score 400 runs in a single Test match innings?",
+    "correct_answer": "Brian Lara",
+    "incorrect_answers": ["Don Bradman", "Matthew Hayden", "Sachin Tendulkar"]
+  },
+  {
+    "category": "Test Cricket",
+    "question": "Who has taken the most wickets in international Test cricket history?",
+    "correct_answer": "Muttiah Muralitharan",
+    "incorrect_answers": ["Shane Warne", "James Anderson", "Anil Kumble"]
+  }
+]
