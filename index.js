@@ -161,7 +161,7 @@ client.on('interactionCreate', async interaction => {
                 );
             });
 
-            let qTimeLeft = 15;
+            let qTimeLeft = 10;
             const qEmbed = new EmbedBuilder()
                 .setColor(0x0099FF)
                 .setTitle(`🏏 Question ${qIndex + 1} of ${totalQuestions} (Multiplayer Match)`)
