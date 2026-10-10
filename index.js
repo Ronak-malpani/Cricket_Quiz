@@ -3,6 +3,19 @@ const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle,
 const { getCricketQuestions } = require('./fetchQuestions');
 const fs = require('fs');
 
+// Add this at the bottom of your index.js file
+const express = require('express');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.send('Cricket Quiz Bot is alive!');
+});
+
+app.listen(PORT, () => {
+  console.log(`Web server is running on port ${PORT}`);
+});
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
 
 const SCORES_FILE = './scores.json';
