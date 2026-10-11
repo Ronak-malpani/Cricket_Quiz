@@ -1,9 +1,10 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { getCricketQuestions } = require('./fetchQuestions');
+const { dropCardReward } = require('./economy.js');
 const fs = require('fs');
 
-// Add this at the bottom of your index.js file
+// Express server setup for 24/7 uptime
 const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,6 +20,7 @@ app.listen(PORT, () => {
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
 
 const SCORES_FILE = './scores.json';
+const INVENTORY_FILE = './user_inventory.json';
 
 function loadScores() {
     try {
@@ -45,6 +47,9 @@ const commands = [
                 )
         ),
     new SlashCommandBuilder()
+        .setName('inventory')
+        .setDescription('View your cards, coins, unopened packs, and open saved packs!'),
+    new SlashCommandBuilder()
         .setName('leaderboard')
         .setDescription('View this server\'s top cricket experts leaderboard!'),
     new SlashCommandBuilder()
@@ -65,138 +70,324 @@ client.once('ready', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
+    // 1. Handle Button Interactions Separately
+    if (interaction.isButton()) {
+        if (interaction.customId === 'join_lobby' || interaction.customId === 'start_now') return;
 
-    const { commandName, guildId } = interaction;
+        const parts = interaction.customId.split('_');
+        const action = parts[0]; 
+        const type = parts[1];   
+        const targetUserId = parts[2];
 
-    if (commandName === 'quiz') {
-        // 1. Immediately defer reply to prevent Discord 3-second timeout error
-        await interaction.deferReply();
+        if (interaction.user.id !== targetUserId) {
+            return interaction.reply({ content: '❌ This pack does not belong to you!', flags: 64 }).catch(() => {});
+        }
 
-        const totalQuestions = interaction.options.getInteger('length');
-        const hostId = interaction.user.id;
-        const joinedPlayers = new Map();
+        if (action === 'open' || action === 'invopen') {
+            await interaction.deferUpdate().catch(() => {});
 
-        // Automatically include the host in the lobby
-        joinedPlayers.set(hostId, { username: interaction.user.username, score: 0, streak: 0 });
+            if (action === 'invopen') {
+                let db = { users: {} };
+                if (fs.existsSync(INVENTORY_FILE)) {
+                    db = JSON.parse(fs.readFileSync(INVENTORY_FILE, 'utf8'));
+                }
+                if (!db.users[targetUserId] || db.users[targetUserId].unopened_packs <= 0) {
+                    return interaction.followUp({ content: '❌ You have no unopened packs left!', flags: 64 }).catch(() => {});
+                }
+                db.users[targetUserId].unopened_packs -= 1;
+                fs.writeFileSync(INVENTORY_FILE, JSON.stringify(db, null, 2));
+            }
 
-        // 2. Send Lobby Message with Join Button via editReply
-        const joinRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('join_lobby')
-                .setLabel('Join Quiz Lobby 🏏')
-                .setStyle(ButtonStyle.Success)
-        );
+            const unlockedCard = dropCardReward(targetUserId);
 
-        let lobbyTimeLeft = 15;
-        const lobbyEmbed = new EmbedBuilder()
-            .setColor(0x0099FF)
-            .setTitle('🏏 Pure Cricket Match Lobby')
-            .setDescription(`Hosted by **${interaction.user.username}**\n\n**Players Joined (${joinedPlayers.size}):**\n` + 
-                Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
-                `\n\n⏱️ Match starts in **${lobbyTimeLeft}s**. Click below to join!`)
-            .setFooter({ text: 'Get ready for synchronized questions!' });
+            const cardEmbed = new EmbedBuilder()
+                .setTitle('🎉 Pack Opened!')
+                .setDescription(`You pulled a **[${unlockedCard.rarity}]** card!\n\n**${unlockedCard.name}**\n*Perk: ${unlockedCard.perk}*`)
+                .setImage(unlockedCard.image)
+                .setColor(0xFFD700);
 
-        await interaction.editReply({ embeds: [lobbyEmbed], components: [joinRow] });
-        const lobbyMessage = await interaction.fetchReply();
+            if (action === 'invopen') {
+                return interaction.editReply({ content: '🎁 Successfully opened a saved pack from your inventory!', embeds: [cardEmbed], components: [] });
+            }
 
-        // Lobby Collector for joining
-        const lobbyCollector = lobbyMessage.createMessageComponentCollector({ time: 15000 });
+            return interaction.editReply({ embeds: [cardEmbed], components: [] });
+        } 
+        
+        if (action === 'save') {
+            await interaction.deferUpdate().catch(() => {});
+            let db = { users: {} };
+            if (fs.existsSync(INVENTORY_FILE)) {
+                db = JSON.parse(fs.readFileSync(INVENTORY_FILE, 'utf8'));
+            }
+            if (!db.users[targetUserId]) {
+                db.users[targetUserId] = { coins: 0, inventory: [], unopened_packs: 0 };
+            }
+            if (!db.users[targetUserId].unopened_packs) {
+                db.users[targetUserId].unopened_packs = 0;
+            }
+            db.users[targetUserId].unopened_packs += 1;
+            fs.writeFileSync(INVENTORY_FILE, JSON.stringify(db, null, 2));
 
-        lobbyCollector.on('collect', async i => {
-            if (i.customId === 'join_lobby') {
-                if (!joinedPlayers.has(i.user.id)) {
-                    joinedPlayers.set(i.user.id, { username: i.user.username, score: 0, streak: 0 });
-                    await i.reply({ content: "✅ You have successfully joined the quiz lobby!", ephemeral: true });
-                } else {
-                    await i.reply({ content: "⚠️ You are already in the lobby!", ephemeral: true });
+            return interaction.editReply({ content: '🎒 Pack saved safely to your inventory! Use `/inventory` to open it later.', embeds: [], components: [] });
+        }
+        return;
+    }
+
+    // 2. Handle Slash Commands Separately
+    if (interaction.isChatInputCommand()) {
+        const { commandName, guildId } = interaction;
+
+        if (commandName === 'inventory') {
+            const userId = interaction.user.id;
+            let invDb = { users: {} };
+            if (fs.existsSync(INVENTORY_FILE)) {
+                invDb = JSON.parse(fs.readFileSync(INVENTORY_FILE, 'utf8'));
+            }
+            const userInv = invDb.users[userId] || { coins: 0, inventory: [], unopened_packs: 0 };
+
+            const scores = loadScores();
+            const globalData = scores.global?.[userId] || { lifetimeCorrect: 0 };
+            const totalCorrect = globalData.lifetimeCorrect || 0;
+
+            const milestones = [0, 50, 100, 200, 500];
+            let progressBar = "";
+            let reachedNext = false;
+
+            for (let i = 0; i < milestones.length; i++) {
+                const m = milestones[i];
+                if (totalCorrect >= m) {
+                    progressBar += `✅ **[${m}]** ─── `;
+                } else if (!reachedNext) {
+                    progressBar += `📍 **[You: ${totalCorrect}]** ─── 🎯 **[Next: ${m}]**`;
+                    reachedNext = true;
+                    break;
+                }
+            }
+            if (!reachedNext && totalCorrect >= 500) {
+                progressBar += `🏆 **MAX MILESTONE COMPLETED! (500+)**`;
+            }
+
+            const invEmbed = new EmbedBuilder()
+                .setColor(0x00FFCC)
+                .setTitle(`🎒 ${interaction.user.username}'s Secure Cricket Profile`)
+                .setDescription(`💰 **Coins:** ${userInv.coins}\n📦 **Unopened Packs:** ${userInv.unopened_packs || 0}\n\n` +
+                    `📊 **Career Correct Answers:** ${totalCorrect}\n` +
+                    `🎯 **Milestone Number Line:**\n${progressBar}`)
+                .setFooter({ text: 'Milestones and inventory are bound securely to your Discord ID.' });
+
+            const invRows = [];
+            if ((userInv.unopened_packs || 0) > 0) {
+                const openSavedRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`invopen_pack_${userId}`)
+                        .setLabel(`🎁 Open Saved Pack (${userInv.unopened_packs} left)`)
+                        .setStyle(ButtonStyle.Success)
+                );
+                invRows.push(openSavedRow);
+            }
+
+            return interaction.reply({ embeds: [invEmbed], components: invRows, flags: 64 });
+        }
+
+        if (commandName === 'leaderboard') {
+            const scores = loadScores();
+            const guildScores = scores.guilds?.[guildId] || {};
+            
+            const sortedUsers = Object.entries(guildScores)
+                .sort((a, b) => b[1].points - a[1].points)
+                .slice(0, 10);
+
+            if (sortedUsers.length === 0) {
+                return interaction.reply({ content: "🏆 No scores recorded in this server yet! Run `/quiz` to start playing.", flags: 64 });
+            }
+
+            let description = sortedUsers.map(([id, data], index) => {
+                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `#${index + 1}`;
+                return `${medal} **${data.username}** — **${data.points} pts**`;
+            }).join('\n');
+
+            const lbEmbed = new EmbedBuilder()
+                .setColor(0xFFD700)
+                .setTitle('🏆 Server Cricket Leaderboard')
+                .setDescription(description)
+                .setFooter({ text: 'Play /quiz to climb this server\'s ranks!' });
+
+            return interaction.reply({ embeds: [lbEmbed] });
+        }
+
+        if (commandName === 'global-leaderboard') {
+            const scores = loadScores();
+            const globalScores = scores.global || {};
+            
+            const sortedUsers = Object.entries(globalScores)
+                .sort((a, b) => b[1].points - a[1].points)
+                .slice(0, 10);
+
+            if (sortedUsers.length === 0) {
+                return interaction.reply({ content: "🏆 No global scores recorded yet! Run `/quiz` to start playing.", flags: 64 });
+            }
+
+            let description = sortedUsers.map(([id, data], index) => {
+                const medal = index === 0 ? '🌍🥇' : index === 1 ? '🌍🥈' : index === 2 ? '🌍🥉' : `#${index + 1}`;
+                return `${medal} **${data.username}** — **${data.points} pts**`;
+            }).join('\n');
+
+            const globalEmbed = new EmbedBuilder()
+                .setColor(0x00FF66)
+                .setTitle('🌍 Worldwide Cricket Leaderboard')
+                .setDescription(description)
+                .setFooter({ text: 'Top players across all Discord servers!' });
+
+            return interaction.reply({ embeds: [globalEmbed] });
+        }
+
+        if (commandName === 'quiz') {
+            await interaction.deferReply();
+
+            const totalQuestions = interaction.options.getInteger('length');
+            const hostId = interaction.user.id;
+            const joinedPlayers = new Map();
+
+            joinedPlayers.set(hostId, { username: interaction.user.username, score: 0, streak: 0 });
+
+            const lobbyRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('join_lobby')
+                    .setLabel('Join Quiz Lobby 🏏')
+                    .setStyle(ButtonStyle.Success),
+                new ButtonBuilder()
+                    .setCustomId('start_now')
+                    .setLabel('Start Now 🚀')
+                    .setStyle(ButtonStyle.Primary)
+            );
+
+            let lobbyTimeLeft = 15;
+            const lobbyEmbed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle('🏏 Pure Cricket Match Lobby (Max 10 Players)')
+                .setDescription(`Hosted by **${interaction.user.username}**\n\n**Players Joined (${joinedPlayers.size}/10):**\n` + 
+                    Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
+                    `\n\n⏱️ Match starts in **${lobbyTimeLeft}s** or when the host clicks Start Now!`)
+                .setFooter({ text: 'Get ready for synchronized questions!' });
+
+            await interaction.editReply({ embeds: [lobbyEmbed], components: [lobbyRow] });
+            const lobbyMessage = await interaction.fetchReply();
+
+            const lobbyCollector = lobbyMessage.createMessageComponentCollector({ time: 15000 });
+            let forceStart = false;
+
+            lobbyCollector.on('collect', async i => {
+                if (i.customId === 'join_lobby') {
+                    if (!joinedPlayers.has(i.user.id)) {
+                        if (joinedPlayers.size >= 10) {
+                            return i.reply({ content: "❌ Lobby is full! Maximum 10 players allowed.", flags: 64 });
+                        }
+                        joinedPlayers.set(i.user.id, { username: i.user.username, score: 0, streak: 0 });
+                        await i.reply({ content: "✅ You have successfully joined the quiz lobby!", flags: 64 });
+                    } else {
+                        await i.reply({ content: "⚠️ You are already in the lobby!", flags: 64 });
+                    }
+
+                    const updatedDesc = `Hosted by **${interaction.user.username}**\n\n**Players Joined (${joinedPlayers.size}/10):**\n` + 
+                        Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
+                        `\n\n⏱️ Match starts in **${lobbyTimeLeft}s** or when the host clicks Start Now!`;
+                    
+                    lobbyEmbed.setDescription(updatedDesc);
+                    await lobbyMessage.edit({ embeds: [lobbyEmbed] }).catch(() => {});
                 }
 
-                const updatedDesc = `Hosted by **${interaction.user.username}**\n\n**Players Joined (${joinedPlayers.size}):**\n` + 
+                if (i.customId === 'start_now') {
+                    if (i.user.id !== hostId) {
+                        return i.reply({ content: "❌ Only the host can start the quiz early!", flags: 64 });
+                    }
+                    forceStart = true;
+                    await i.deferUpdate().catch(() => {});
+                    lobbyCollector.stop();
+                }
+            });
+
+            for (let t = 14; t >= 1; t--) {
+                if (forceStart) break;
+                await new Promise(r => setTimeout(r, 1000));
+                lobbyTimeLeft = t;
+                const updatedDesc = `Hosted by **${interaction.user.username}**\n\n**Players Joined (${joinedPlayers.size}/10):**\n` + 
                     Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
-                    `\n\n⏱️ Match starts in **${lobbyTimeLeft}s**. Click below to join!`;
-                
+                    `\n\n⏱️ Match starts in **${lobbyTimeLeft}s** or when the host clicks Start Now!`;
                 lobbyEmbed.setDescription(updatedDesc);
                 await lobbyMessage.edit({ embeds: [lobbyEmbed] }).catch(() => {});
             }
-        });
 
-        // Countdown timer during lobby phase
-        for (let t = 14; t >= 1; t--) {
-            await new Promise(r => setTimeout(r, 1000));
-            lobbyTimeLeft = t;
-            const updatedDesc = `Hosted by **${interaction.user.username}**\n\n**Players Joined (${joinedPlayers.size}):**\n` + 
-                Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
-                `\n\n⏱️ Match starts in **${lobbyTimeLeft}s**. Click below to join!`;
-            lobbyEmbed.setDescription(updatedDesc);
-            await lobbyMessage.edit({ embeds: [lobbyEmbed] }).catch(() => {});
-        }
+            lobbyCollector.stop();
 
-        lobbyCollector.stop();
+            const disabledJoinRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('join_lobby')
+                    .setLabel('Lobby Closed 🔒')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(true),
+                new ButtonBuilder()
+                    .setCustomId('start_now')
+                    .setLabel('Started 🚀')
+                    .setStyle(ButtonStyle.Primary)
+                    .setDisabled(true)
+            );
+            await lobbyMessage.edit({ content: "🚨 **Lobby closed! Fetching synchronized questions...**", components: [disabledJoinRow] }).catch(() => {});
 
-        // Disable lobby join button & fetch questions while lobby finishes
-        const disabledJoinRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('join_lobby')
-                .setLabel('Lobby Closed 🔒')
-                .setStyle(ButtonStyle.Secondary)
-                .setDisabled(true)
-        );
-        await lobbyMessage.edit({ content: "🚨 **Lobby closed! Fetching synchronized questions...**", components: [disabledJoinRow] }).catch(() => {});
+            const questions = await getCricketQuestions(totalQuestions);
 
-        // Fetch synchronized question set for all players
-        const questions = await getCricketQuestions(totalQuestions);
+            for (let qIndex = 0; qIndex < questions.length; qIndex++) {
+                const q = questions[qIndex];
+                const correctIndex = q.answer;
 
-        // 3. Loop through questions where everyone answers concurrently
-        for (let qIndex = 0; qIndex < questions.length; qIndex++) {
-            const q = questions[qIndex];
+                const row = new ActionRowBuilder();
+                q.options.forEach((option, index) => {
+                    row.addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(`q_${qIndex}_${index}`)
+                            .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
+                            .setStyle(ButtonStyle.Primary)
+                    );
+                });
 
-            const row = new ActionRowBuilder();
-            q.options.forEach((option, index) => {
-                row.addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`q_${qIndex}_${index}`)
-                        .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
-                        .setStyle(ButtonStyle.Primary)
-                );
-            });
+                let qTimeLeft = 10;
+                const qEmbed = new EmbedBuilder()
+                    .setColor(0x0099FF)
+                    .setTitle(`🏏 Question ${qIndex + 1} of ${totalQuestions} (Multiplayer Match)`)
+                    .setDescription(q.question)
+                    .setFooter({ text: `⏱️ Time remaining: ${qTimeLeft}s | Players active: ${joinedPlayers.size}` });
 
-            let qTimeLeft = 10;
-            const qEmbed = new EmbedBuilder()
-                .setColor(0x0099FF)
-                .setTitle(`🏏 Question ${qIndex + 1} of ${totalQuestions} (Multiplayer Match)`)
-                .setDescription(q.question)
-                .setFooter({ text: `⏱️ Time remaining: ${qTimeLeft}s | Players active: ${joinedPlayers.size}` });
+                const questionMessage = await interaction.channel.send({ embeds: [qEmbed], components: [row] });
 
-            const questionMessage = await interaction.channel.send({ embeds: [qEmbed], components: [row] });
+                const qInterval = setInterval(async () => {
+                    if (qTimeLeft <= 1) {
+                        clearInterval(qInterval);
+                        return;
+                    }
+                    qTimeLeft -= 1;
+                    qEmbed.setFooter({ text: `⏱️ Time remaining: ${qTimeLeft}s | Players active: ${joinedPlayers.size}` });
+                    await questionMessage.edit({ embeds: [qEmbed] }).catch(() => {});
+                }, 1000);
 
-            const qInterval = setInterval(async () => {
-                if (qTimeLeft <= 1) {
-                    clearInterval(qInterval);
-                    return;
-                }
-                qTimeLeft -= 1;
-                qEmbed.setFooter({ text: `⏱️ Time remaining: ${qTimeLeft}s | Players active: ${joinedPlayers.size}` });
-                await questionMessage.edit({ embeds: [qEmbed] }).catch(() => {});
-            }, 1000);
+                const answeredUsers = new Set();
+                const roundCollector = questionMessage.createMessageComponentCollector({ time: 15000 });
 
-            const answeredUsers = new Set();
-            const roundCollector = questionMessage.createMessageComponentCollector({ time: 15000 });
-
-            roundCollector.on('collect', async i => {
+               roundCollector.on('collect', async i => {
                 if (!joinedPlayers.has(i.user.id)) {
-                    return i.reply({ content: "❌ You did not join this match lobby! Wait for the next round.", ephemeral: true });
+                    return i.reply({ content: "❌ You did not join this match lobby! Wait for the next round.", flags: 64 }).catch(() => {});
                 }
 
                 if (answeredUsers.has(i.user.id)) {
-                    return i.reply({ content: "⚠️ You already answered this question!", ephemeral: true });
+                    return i.reply({ content: "⚠️ You already answered this question!", flags: 64 }).catch(() => {});
                 }
 
+                // Immediately acknowledge the click safely
+                await i.deferUpdate().catch(() => {});
                 answeredUsers.add(i.user.id);
+
                 const selectedIndex = parseInt(i.customId.split('_')[2]);
                 const player = joinedPlayers.get(i.user.id);
 
-                if (selectedIndex === q.answer) {
+                if (selectedIndex === correctIndex) {
                     player.streak += 1;
                     let earned = 1;
                     let streakMsg = "";
@@ -211,113 +402,130 @@ client.on('interactionCreate', async interaction => {
                     if (!scores.global) scores.global = {};
                     if (!scores.guilds) scores.guilds = {};
                     if (!scores.guilds[guildId]) scores.guilds[guildId] = {};
-                    if (!scores.global[i.user.id]) scores.global[i.user.id] = { username: i.user.username, points: 0 };
-                    if (!scores.guilds[guildId][i.user.id]) scores.guilds[guildId][i.user.id] = { username: i.user.username, points: 0 };
+                    
+                    if (!scores.global[i.user.id]) {
+                        scores.global[i.user.id] = { username: i.user.username, points: 0, lifetimeCorrect: 0, claimedMilestones: [] };
+                    }
+                    if (!scores.guilds[guildId][i.user.id]) {
+                        scores.guilds[guildId][i.user.id] = { username: i.user.username, points: 0 };
+                    }
 
                     scores.global[i.user.id].points += earned;
                     scores.guilds[guildId][i.user.id].points += earned;
+                    
+                    if (!scores.global[i.user.id].lifetimeCorrect) scores.global[i.user.id].lifetimeCorrect = 0;
+                    if (!scores.global[i.user.id].claimedMilestones) scores.global[i.user.id].claimedMilestones = [];
+
+                    scores.global[i.user.id].lifetimeCorrect += 1;
+                    const totalCorrect = scores.global[i.user.id].lifetimeCorrect;
+
                     saveScores(scores);
 
-                    await i.reply({ content: `🎉 Correct! (+${earned} pts).${streakMsg}`, ephemeral: true });
+                    const milestones = [50, 100, 200, 500];
+                    let milestoneHit = null;
+
+                    for (const m of milestones) {
+                        if (totalCorrect >= m && !scores.global[i.user.id].claimedMilestones.includes(m)) {
+                            scores.global[i.user.id].claimedMilestones.push(m);
+                            milestoneHit = m;
+                            saveScores(scores);
+                            break;
+                        }
+                    }
+
+                    if (milestoneHit) {
+                        const packRow = new ActionRowBuilder().addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(`open_pack_${i.user.id}`)
+                                .setLabel('🎁 Open Milestone Pack')
+                                .setStyle(ButtonStyle.Success),
+                            new ButtonBuilder()
+                                .setCustomId(`save_pack_${i.user.id}`)
+                                .setLabel('🎒 Save for Later')
+                                .setStyle(ButtonStyle.Secondary)
+                        );
+
+                        const packEmbed = new EmbedBuilder()
+                            .setColor(0xFFD700)
+                            .setTitle('🌟 Career Milestone Reached!')
+                            .setDescription(`Incredible dedication! You have reached **${milestoneHit} total correct answers** career-wide and unlocked a **Bonus Player Pack**!`);
+
+                        await i.followUp({ content: `🎉 Correct! (+${earned} pts).${streakMsg}`, embeds: [packEmbed], components: [packRow], flags: 64 }).catch(() => {});
+                    } else {
+                        await i.followUp({ content: `🎉 Correct! (+${earned} pts).${streakMsg} *(Career Correct: ${totalCorrect})*`, flags: 64 }).catch(() => {});
+                    }
                 } else {
                     player.streak = 0;
-                    await i.reply({ content: `❌ Incorrect! The correct answer was **${q.options[q.answer]}**. Streak reset.`, ephemeral: true });
+                    await i.followUp({ content: `❌ Incorrect! The correct answer was **${q.options[correctIndex]}**. Streak reset.`, flags: 64 }).catch(() => {});
                 }
             });
 
-            await new Promise(resolve => {
-                roundCollector.on('end', async () => {
-                    clearInterval(qInterval);
+                await new Promise(resolve => {
+                    roundCollector.on('end', async () => {
+                        clearInterval(qInterval);
 
-                    const disabledQRow = new ActionRowBuilder();
-                    q.options.forEach((option, index) => {
-                        let style = ButtonStyle.Secondary;
-                        if (index === q.answer) style = ButtonStyle.Success;
-                        disabledQRow.addComponents(
-                            new ButtonBuilder()
-                                .setCustomId(`dis_${index}`)
-                                .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
-                                .setStyle(style)
-                                .setDisabled(true)
-                        );
+                        const disabledQRow = new ActionRowBuilder();
+                        q.options.forEach((option, index) => {
+                            let style = ButtonStyle.Secondary;
+                            if (index === correctIndex) style = ButtonStyle.Success;
+                            disabledQRow.addComponents(
+                                new ButtonBuilder()
+                                    .setCustomId(`dis_${index}`)
+                                    .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
+                                    .setStyle(style)
+                                    .setDisabled(true)
+                            );
+                        });
+
+                        await questionMessage.edit({
+                            content: `🔒 **Time's up for Question ${qIndex + 1}!** Correct Answer: **${q.options[correctIndex]}**`,
+                            components: [disabledQRow]
+                        }).catch(() => {});
+
+                        setTimeout(resolve, 2000);
                     });
-
-                    await questionMessage.edit({
-                        content: `🔒 **Time's up for Question ${qIndex + 1}!** Correct Answer: **${q.options[q.answer]}**`,
-                        components: [disabledQRow]
-                    }).catch(() => {});
-
-                    setTimeout(resolve, 2000);
                 });
-            });
+            }
+
+            const sortedMatchPlayers = Array.from(joinedPlayers.entries()).sort((a, b) => b[1].score - a[1].score);
+            let summaryDesc = sortedMatchPlayers.map(([userId, p], idx) => {
+                const medal = idx === 0 ? '🏆' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
+                return `${medal} **${p.username}** — **${p.score} points**`;
+            }).join('\n');
+
+            const summaryEmbed = new EmbedBuilder()
+                .setColor(0xFFD700)
+                .setTitle('🏁 Multiplayer Match Complete!')
+                .setDescription(`Here are the final standings for this session:\n\n${summaryDesc}`)
+                .setFooter({ text: 'Check overall standings using /leaderboard or /global-leaderboard' });
+
+            await interaction.channel.send({ embeds: [summaryEmbed] });
+
+            const SCORE_THRESHOLD = 3;
+            const eligibleWinners = sortedMatchPlayers.filter(([userId, data]) => data.score >= SCORE_THRESHOLD);
+
+            if (eligibleWinners.length > 0) {
+                for (const [winnerId, winnerData] of eligibleWinners) {
+                    const packRow = new ActionRowBuilder().addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(`open_pack_${winnerId}`)
+                            .setLabel('🎁 Open Pack Now')
+                            .setStyle(ButtonStyle.Success),
+                        new ButtonBuilder()
+                            .setCustomId(`save_pack_${winnerId}`)
+                            .setLabel('🎒 Save for Later')
+                            .setStyle(ButtonStyle.Secondary)
+                    );
+
+                    const packEmbed = new EmbedBuilder()
+                        .setColor(0x00FFCC)
+                        .setTitle('🎁 Match Reward Unlocked!')
+                        .setDescription(`Congratulations <@${winnerId}>! You scored **${winnerData.score} points** (meeting the threshold) and earned **1x Cricket Player Pack**.`);
+
+                    await interaction.channel.send({ content: `<@${winnerId}>`, embeds: [packEmbed], components: [packRow] });
+                }
+            }
         }
-
-        // 4. Match Summary Leaderboard
-        const sortedMatchPlayers = Array.from(joinedPlayers.values()).sort((a, b) => b.score - a.score);
-        let summaryDesc = sortedMatchPlayers.map((p, idx) => {
-            const medal = idx === 0 ? '🏆' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
-            return `${medal} **${p.username}** — **${p.score} points**`;
-        }).join('\n');
-
-        const summaryEmbed = new EmbedBuilder()
-            .setColor(0xFFD700)
-            .setTitle('🏁 Multiplayer Match Complete!')
-            .setDescription(`Here are the final standings for this session:\n\n${summaryDesc}`)
-            .setFooter({ text: 'Check overall standings using /leaderboard or /global-leaderboard' });
-
-        await interaction.channel.send({ embeds: [summaryEmbed] });
-    }
-
-    if (commandName === 'leaderboard') {
-        const scores = loadScores();
-        const guildScores = scores.guilds?.[guildId] || {};
-        
-        const sortedUsers = Object.entries(guildScores)
-            .sort((a, b) => b[1].points - a[1].points)
-            .slice(0, 10);
-
-        if (sortedUsers.length === 0) {
-            return interaction.reply({ content: "🏆 No scores recorded in this server yet! Run `/quiz` to start playing.", ephemeral: true });
-        }
-
-        let description = sortedUsers.map(([id, data], index) => {
-            const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `#${index + 1}`;
-            return `${medal} **${data.username}** — **${data.points} pts**`;
-        }).join('\n');
-
-        const lbEmbed = new EmbedBuilder()
-            .setColor(0xFFD700)
-            .setTitle('🏆 Server Cricket Leaderboard')
-            .setDescription(description)
-            .setFooter({ text: 'Play /quiz to climb this server\'s ranks!' });
-
-        await interaction.reply({ embeds: [lbEmbed] });
-    }
-
-    if (commandName === 'global-leaderboard') {
-        const scores = loadScores();
-        const globalScores = scores.global || {};
-        
-        const sortedUsers = Object.entries(globalScores)
-            .sort((a, b) => b[1].points - a[1].points)
-            .slice(0, 10);
-
-        if (sortedUsers.length === 0) {
-            return interaction.reply({ content: "🏆 No global scores recorded yet! Run `/quiz` to start playing.", ephemeral: true });
-        }
-
-        let description = sortedUsers.map(([id, data], index) => {
-            const medal = index === 0 ? '🌍🥇' : index === 1 ? '🌍🥈' : index === 2 ? '🌍🥉' : `#${index + 1}`;
-            return `${medal} **${data.username}** — **${data.points} pts**`;
-        }).join('\n');
-
-        const globalEmbed = new EmbedBuilder()
-            .setColor(0x00FF66)
-            .setTitle('🌍 Worldwide Cricket Leaderboard')
-            .setDescription(description)
-            .setFooter({ text: 'Top players across all Discord servers!' });
-
-        await interaction.reply({ embeds: [globalEmbed] });
     }
 });
 
