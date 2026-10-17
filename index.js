@@ -2,6 +2,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { getCricketQuestions } = require('./fetchQuestions');
 const { dropCardReward } = require('./economy.js');
+const { startDailyTriviaScheduler, handleDailyTriviaInteraction, triggerAutomatedQotd } = require('./dailyTrivia');
 const fs = require('fs');
 
 // Express server setup for 24/7 uptime
@@ -10,11 +11,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.send('Cricket Quiz Bot is alive!');
+    res.send('Cricket Quiz Bot is alive!');
 });
 
 app.listen(PORT, () => {
-  console.log(`Web server is running on port ${PORT}`);
+    console.log(`Web server is running on port ${PORT}`);
 });
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
@@ -54,13 +55,17 @@ const commands = [
         .setDescription('View this server\'s top cricket experts leaderboard!'),
     new SlashCommandBuilder()
         .setName('global-leaderboard')
-        .setDescription('View the worldwide top cricket experts leaderboard!')
+        .setDescription('View the worldwide top cricket experts leaderboard!'),
+    new SlashCommandBuilder()
+        .setName('qotd')
+        .setDescription('Trigger today\'s Cricket Question of the Day with a role ping and 30s timer!')
 ].map(command => command.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`Bot logged in as ${client.user.tag}`);
+    startDailyTriviaScheduler(client);
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Successfully registered global application slash commands.');
@@ -72,12 +77,50 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
     // 1. Handle Button Interactions Separately
     if (interaction.isButton()) {
-        if (interaction.customId === 'join_lobby' || interaction.customId === 'start_now') return;
+        if (
+            interaction.customId === 'join_lobby' || 
+            interaction.customId === 'leave_lobby' || 
+            interaction.customId === 'start_now' || 
+            interaction.customId === 'cancel_match' || 
+            interaction.customId === 'transfer_host' || 
+            interaction.customId.startsWith('q_') || 
+            interaction.customId.startsWith('dis_')
+        ) {
+            return; 
+        }
+
+        // Handle QOTD button answers (30s timed daily question)
+        if (interaction.customId.startsWith('qotd_')) {
+            const [, qIdx, selectedOpt, correctOpt, authorId] = interaction.customId.split('_');
+            const userId = interaction.user.id;
+
+            let invDb = { users: {} };
+            if (fs.existsSync(INVENTORY_FILE)) {
+                invDb = JSON.parse(fs.readFileSync(INVENTORY_FILE, 'utf8'));
+            }
+            if (!invDb.users[userId]) {
+                invDb.users[userId] = { coins: 0, inventory: [], unopened_packs: 0 };
+            }
+
+            const selectedIndex = parseInt(selectedOpt);
+            const correctIndex = parseInt(correctOpt);
+
+            if (selectedIndex === correctIndex) {
+                invDb.users[userId].coins += 50; 
+                fs.writeFileSync(INVENTORY_FILE, JSON.stringify(invDb, null, 2));
+                return interaction.reply({ content: '🎉 **Correct (+1 Correct / 0 Incorrect)!** You earned **+50 Cricket Avengers Coins**! Check your `/inventory`.', flags: 64 }).catch(() => {});
+            } else {
+                return interaction.reply({ content: '❌ **Incorrect (0 Correct / +1 Incorrect)!** Better luck on the next QOTD question.', flags: 64 }).catch(() => {});
+            }
+        }
+
+        if (!interaction.customId.startsWith('open_pack_') && !interaction.customId.startsWith('save_pack_') && !interaction.customId.startsWith('invopen_pack_')) {
+            return;
+        }
 
         const parts = interaction.customId.split('_');
         const action = parts[0]; 
-        const type = parts[1];   
-        const targetUserId = parts[2];
+        const targetUserId = parts[parts.length - 1]; 
 
         if (interaction.user.id !== targetUserId) {
             return interaction.reply({ content: '❌ This pack does not belong to you!', flags: 64 }).catch(() => {});
@@ -170,7 +213,7 @@ client.on('interactionCreate', async interaction => {
             const invEmbed = new EmbedBuilder()
                 .setColor(0x00FFCC)
                 .setTitle(`🎒 ${interaction.user.username}'s Secure Cricket Profile`)
-                .setDescription(`💰 **Coins:** ${userInv.coins}\n📦 **Unopened Packs:** ${userInv.unopened_packs || 0}\n\n` +
+                .setDescription(`💰 **Cricket Avengers Coins:** ${userInv.coins}\n📦 **Unopened Packs:** ${userInv.unopened_packs || 0}\n\n` +
                     `📊 **Career Correct Answers:** ${totalCorrect}\n` +
                     `🎯 **Milestone Number Line:**\n${progressBar}`)
                 .setFooter({ text: 'Milestones and inventory are bound securely to your Discord ID.' });
@@ -187,6 +230,48 @@ client.on('interactionCreate', async interaction => {
             }
 
             return interaction.reply({ embeds: [invEmbed], components: invRows, flags: 64 });
+        }
+
+        if (commandName === 'qotd') {
+            await interaction.deferReply();
+            const questions = await getCricketQuestions(1);
+            const q = questions[0];
+
+            const row = new ActionRowBuilder();
+            q.options.forEach((option, index) => {
+                row.addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`qotd_0_${index}_${q.answer}_${interaction.user.id}`)
+                        .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
+                        .setStyle(ButtonStyle.Primary)
+                );
+            });
+
+            const qotdEmbed = new EmbedBuilder()
+                .setColor(0xFF5733)
+                .setTitle('⭐ Daily Cricket Question of the Day (QOTD)')
+                .setDescription(q.question + '\n\n*⏱️ You have **30 seconds** to answer!* \n*📝 Note: +1 Correct / 0 Incorrect tracking applies. Answer correctly to win **50 Cricket Avengers Coins**!*')
+                .setFooter({ text: 'Daily community trivia challenge' });
+
+            const qotdMsg = await interaction.editReply({ content: '@everyone 🚨 **New Daily QOTD Challenge is Live!**', embeds: [qotdEmbed], components: [row] });
+
+            const qotdCollector = qotdMsg.createMessageComponentCollector({ time: 30000 });
+            qotdCollector.on('end', async () => {
+                const disabledRow = new ActionRowBuilder();
+                q.options.forEach((option, index) => {
+                    let style = ButtonStyle.Secondary;
+                    if (index === q.answer) style = ButtonStyle.Success;
+                    disabledRow.addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(`qotd_dis_${index}`)
+                            .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
+                            .setStyle(style)
+                            .setDisabled(true)
+                    );
+                });
+                await qotdMsg.edit({ content: '🔒 **QOTD Closed!** Time is up for today\'s question.', components: [disabledRow] }).catch(() => {});
+            });
+            return;
         }
 
         if (commandName === 'leaderboard') {
@@ -242,288 +327,311 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (commandName === 'quiz') {
-            await interaction.deferReply();
+            // Prevent multiple overlapping quizzes in the same channel
+            if (global.activeQuizChannels && global.activeQuizChannels.has(interaction.channelId)) {
+                return interaction.reply({ content: "⚠️ A multiplayer quiz match is already running in this channel! Please wait for it to finish.", flags: 64 });
+            }
 
-            const totalQuestions = interaction.options.getInteger('length');
-            const hostId = interaction.user.id;
-            const joinedPlayers = new Map();
+            if (!global.activeQuizChannels) global.activeQuizChannels = new Set();
+            global.activeQuizChannels.add(interaction.channelId);
 
-            joinedPlayers.set(hostId, { username: interaction.user.username, score: 0, streak: 0 });
+            try {
+                await interaction.reply({ content: '🏏 **Starting Multiplayer Lobby...**', flags: 64 }).catch(() => {});
 
-            const lobbyRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('join_lobby')
-                    .setLabel('Join Quiz Lobby 🏏')
-                    .setStyle(ButtonStyle.Success),
-                new ButtonBuilder()
-                    .setCustomId('start_now')
-                    .setLabel('Start Now 🚀')
-                    .setStyle(ButtonStyle.Primary)
-            );
+                const totalQuestions = interaction.options.getInteger('length');
+                let hostId = interaction.user.id;
+                const joinedPlayers = new Map();
 
-            let lobbyTimeLeft = 15;
-            const lobbyEmbed = new EmbedBuilder()
-                .setColor(0x0099FF)
-                .setTitle('🏏 Pure Cricket Match Lobby (Max 10 Players)')
-                .setDescription(`Hosted by **${interaction.user.username}**\n\n**Players Joined (${joinedPlayers.size}/10):**\n` + 
-                    Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
-                    `\n\n⏱️ Match starts in **${lobbyTimeLeft}s** or when the host clicks Start Now!`)
-                .setFooter({ text: 'Get ready for synchronized questions!' });
+                joinedPlayers.set(hostId, { username: interaction.user.username, score: 0, streak: 0 });
 
-            await interaction.editReply({ embeds: [lobbyEmbed], components: [lobbyRow] });
-            const lobbyMessage = await interaction.fetchReply();
+                const getLobbyRows = () => [
+                    new ActionRowBuilder().addComponents(
+                        new ButtonBuilder().setCustomId('join_lobby').setLabel('Join Lobby 🏏').setStyle(ButtonStyle.Success),
+                        new ButtonBuilder().setCustomId('leave_lobby').setLabel('Leave Lobby 🚪').setStyle(ButtonStyle.Secondary),
+                        new ButtonBuilder().setCustomId('start_now').setLabel('Start Now 🚀').setStyle(ButtonStyle.Primary)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new ButtonBuilder().setCustomId('cancel_match').setLabel('Cancel Match ❌').setStyle(ButtonStyle.Danger),
+                        new ButtonBuilder().setCustomId('transfer_host').setLabel('Transfer Host 👑').setStyle(ButtonStyle.Secondary)
+                    )
+                ];
 
-            const lobbyCollector = lobbyMessage.createMessageComponentCollector({ time: 15000 });
-            let forceStart = false;
+                let lobbyTimeLeft = 15;
+                const lobbyEmbed = new EmbedBuilder()
+                    .setColor(0x0099FF)
+                    .setTitle('🏏 Pure Cricket Match Lobby (Max 10 Players)')
+                    .setDescription(`Hosted by <@${hostId}>\n\n**Players Joined (${joinedPlayers.size}/10):**\n` + 
+                        Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
+                        `\n\n⏱️ Match starts in **${lobbyTimeLeft}s** or when the host clicks Start Now!`)
+                    .setFooter({ text: 'Get ready for synchronized questions!' });
 
-            lobbyCollector.on('collect', async i => {
-                if (i.customId === 'join_lobby') {
-                    if (!joinedPlayers.has(i.user.id)) {
-                        if (joinedPlayers.size >= 10) {
-                            return i.reply({ content: "❌ Lobby is full! Maximum 10 players allowed.", flags: 64 });
+                const lobbyMessage = await interaction.channel.send({ embeds: [lobbyEmbed], components: getLobbyRows() });
+
+                const lobbyCollector = lobbyMessage.createMessageComponentCollector({ time: 15000 });
+                let forceStart = false;
+                let matchCancelled = false;
+
+                lobbyCollector.on('collect', async i => {
+                    if (i.customId === 'join_lobby') {
+                        if (!joinedPlayers.has(i.user.id)) {
+                            if (joinedPlayers.size >= 10) {
+                                return i.reply({ content: "❌ Lobby is full! Maximum 10 players allowed.", flags: 64 });
+                            }
+                            joinedPlayers.set(i.user.id, { username: i.user.username, score: 0, streak: 0 });
+                            await i.reply({ content: "✅ You have successfully joined the quiz lobby!", flags: 64 });
+                        } else {
+                            await i.reply({ content: "⚠️ You are already in the lobby!", flags: 64 });
                         }
-                        joinedPlayers.set(i.user.id, { username: i.user.username, score: 0, streak: 0 });
-                        await i.reply({ content: "✅ You have successfully joined the quiz lobby!", flags: 64 });
-                    } else {
-                        await i.reply({ content: "⚠️ You are already in the lobby!", flags: 64 });
                     }
 
-                    const updatedDesc = `Hosted by **${interaction.user.username}**\n\n**Players Joined (${joinedPlayers.size}/10):**\n` + 
+                    if (i.customId === 'leave_lobby') {
+                        if (i.user.id === hostId) {
+                            return i.reply({ content: "❌ As the host, you cannot leave! Use **Cancel Match** or transfer host first.", flags: 64 });
+                        }
+                        if (joinedPlayers.has(i.user.id)) {
+                            joinedPlayers.delete(i.user.id);
+                            await i.reply({ content: "🚪 You have left the quiz lobby.", flags: 64 });
+                        } else {
+                            await i.reply({ content: "⚠️ You are not in the lobby!", flags: 64 });
+                        }
+                    }
+
+                    if (i.customId === 'cancel_match') {
+                        if (i.user.id !== hostId) {
+                            return i.reply({ content: "❌ Only the host can cancel the match!", flags: 64 });
+                        }
+                        matchCancelled = true;
+                        await i.deferUpdate().catch(() => {});
+                        lobbyCollector.stop();
+                        return;
+                    }
+
+                    if (i.customId === 'transfer_host') {
+                        if (i.user.id !== hostId) {
+                            return i.reply({ content: "❌ Only the current host can transfer host privileges!", flags: 64 });
+                        }
+                        const otherPlayers = Array.from(joinedPlayers.keys()).filter(id => id !== hostId);
+                        if (otherPlayers.length === 0) {
+                            return i.reply({ content: "❌ There are no other players in the lobby to transfer host to!", flags: 64 });
+                        }
+                        hostId = otherPlayers[0];
+                        await i.reply({ content: `👑 Host privileges transferred to <@${hostId}>!`, flags: 64 });
+                    }
+
+                    const updatedDesc = `Hosted by <@${hostId}>\n\n**Players Joined (${joinedPlayers.size}/10):**\n` + 
                         Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
                         `\n\n⏱️ Match starts in **${lobbyTimeLeft}s** or when the host clicks Start Now!`;
                     
                     lobbyEmbed.setDescription(updatedDesc);
+                    await lobbyMessage.edit({ embeds: [lobbyEmbed], components: getLobbyRows() }).catch(() => {});
+
+                    if (i.customId === 'start_now') {
+                        if (i.user.id !== hostId) {
+                            return i.reply({ content: "❌ Only the host can start the quiz early!", flags: 64 });
+                        }
+                        forceStart = true;
+                        await i.deferUpdate().catch(() => {});
+                        lobbyCollector.stop();
+                    }
+                });
+
+                for (let t = 14; t >= 1; t--) {
+                    if (forceStart || matchCancelled) break;
+                    await new Promise(r => setTimeout(r, 1000));
+                    lobbyTimeLeft = t;
+                    const updatedDesc = `Hosted by <@${hostId}>\n\n**Players Joined (${joinedPlayers.size}/10):**\n` + 
+                        Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
+                        `\n\n⏱️ Match starts in **${lobbyTimeLeft}s** or when the host clicks Start Now!`;
+                    lobbyEmbed.setDescription(updatedDesc);
                     await lobbyMessage.edit({ embeds: [lobbyEmbed] }).catch(() => {});
                 }
 
-                if (i.customId === 'start_now') {
-                    if (i.user.id !== hostId) {
-                        return i.reply({ content: "❌ Only the host can start the quiz early!", flags: 64 });
-                    }
-                    forceStart = true;
-                    await i.deferUpdate().catch(() => {});
-                    lobbyCollector.stop();
-                }
-            });
+                lobbyCollector.stop();
 
-            for (let t = 14; t >= 1; t--) {
-                if (forceStart) break;
-                await new Promise(r => setTimeout(r, 1000));
-                lobbyTimeLeft = t;
-                const updatedDesc = `Hosted by **${interaction.user.username}**\n\n**Players Joined (${joinedPlayers.size}/10):**\n` + 
-                    Array.from(joinedPlayers.values()).map(p => `• ${p.username}`).join('\n') +
-                    `\n\n⏱️ Match starts in **${lobbyTimeLeft}s** or when the host clicks Start Now!`;
-                lobbyEmbed.setDescription(updatedDesc);
-                await lobbyMessage.edit({ embeds: [lobbyEmbed] }).catch(() => {});
-            }
-
-            lobbyCollector.stop();
-
-            const disabledJoinRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('join_lobby')
-                    .setLabel('Lobby Closed 🔒')
-                    .setStyle(ButtonStyle.Secondary)
-                    .setDisabled(true),
-                new ButtonBuilder()
-                    .setCustomId('start_now')
-                    .setLabel('Started 🚀')
-                    .setStyle(ButtonStyle.Primary)
-                    .setDisabled(true)
-            );
-            await lobbyMessage.edit({ content: "🚨 **Lobby closed! Fetching synchronized questions...**", components: [disabledJoinRow] }).catch(() => {});
-
-            const questions = await getCricketQuestions(totalQuestions);
-
-            for (let qIndex = 0; qIndex < questions.length; qIndex++) {
-                const q = questions[qIndex];
-                const correctIndex = q.answer;
-
-                const row = new ActionRowBuilder();
-                q.options.forEach((option, index) => {
-                    row.addComponents(
-                        new ButtonBuilder()
-                            .setCustomId(`q_${qIndex}_${index}`)
-                            .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
-                            .setStyle(ButtonStyle.Primary)
+                if (matchCancelled) {
+                    const canceledRow = new ActionRowBuilder().addComponents(
+                        new ButtonBuilder().setCustomId('cancelled').setLabel('Match Cancelled ❌').setStyle(ButtonStyle.Danger).setDisabled(true)
                     );
-                });
-
-                let qTimeLeft = 10;
-                const qEmbed = new EmbedBuilder()
-                    .setColor(0x0099FF)
-                    .setTitle(`🏏 Question ${qIndex + 1} of ${totalQuestions} (Multiplayer Match)`)
-                    .setDescription(q.question)
-                    .setFooter({ text: `⏱️ Time remaining: ${qTimeLeft}s | Players active: ${joinedPlayers.size}` });
-
-                const questionMessage = await interaction.channel.send({ embeds: [qEmbed], components: [row] });
-
-                const qInterval = setInterval(async () => {
-                    if (qTimeLeft <= 1) {
-                        clearInterval(qInterval);
-                        return;
-                    }
-                    qTimeLeft -= 1;
-                    qEmbed.setFooter({ text: `⏱️ Time remaining: ${qTimeLeft}s | Players active: ${joinedPlayers.size}` });
-                    await questionMessage.edit({ embeds: [qEmbed] }).catch(() => {});
-                }, 1000);
-
-                const answeredUsers = new Set();
-                const roundCollector = questionMessage.createMessageComponentCollector({ time: 15000 });
-
-               roundCollector.on('collect', async i => {
-                if (!joinedPlayers.has(i.user.id)) {
-                    return i.reply({ content: "❌ You did not join this match lobby! Wait for the next round.", flags: 64 }).catch(() => {});
+                    await lobbyMessage.edit({ content: "❌ **Lobby cancelled by the host.**", components: [canceledRow] }).catch(() => {});
+                    return;
                 }
 
-                if (answeredUsers.has(i.user.id)) {
-                    return i.reply({ content: "⚠️ You already answered this question!", flags: 64 }).catch(() => {});
-                }
+                const disabledJoinRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('join_lobby')
+                        .setLabel('Lobby Closed 🔒')
+                        .setStyle(ButtonStyle.Secondary)
+                        .setDisabled(true),
+                    new ButtonBuilder()
+                        .setCustomId('start_now')
+                        .setLabel('Started 🚀')
+                        .setStyle(ButtonStyle.Primary)
+                        .setDisabled(true)
+                );
+                await lobbyMessage.edit({ content: "🚨 **Lobby closed! Fetching synchronized questions...**", components: [disabledJoinRow] }).catch(() => {});
 
-                // Immediately acknowledge the click safely
-                await i.deferUpdate().catch(() => {});
-                answeredUsers.add(i.user.id);
+                const questions = await getCricketQuestions(totalQuestions);
 
-                const selectedIndex = parseInt(i.customId.split('_')[2]);
-                const player = joinedPlayers.get(i.user.id);
+                // STRICTLY SEQUENTIAL QUESTION LOOP (Waits for each question to fully finish before posting the next one)
+                for (let qIndex = 0; qIndex < questions.length; qIndex++) {
+                    const q = questions[qIndex];
+                    const correctIndex = q.answer;
 
-                if (selectedIndex === correctIndex) {
-                    player.streak += 1;
-                    let earned = 1;
-                    let streakMsg = "";
-                    if (player.streak >= 3) {
-                        earned += 2;
-                        streakMsg = ` 🔥 (${player.streak}x Streak! +2 Pts)`;
-                    }
+                    const row = new ActionRowBuilder();
+                    q.options.forEach((option, index) => {
+                        row.addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(`q_${qIndex}_${index}`)
+                                .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
+                                .setStyle(ButtonStyle.Primary)
+                        );
+                    });
 
-                    player.score += earned;
+                    let qTimeLeft = 10;
+                    const qEmbed = new EmbedBuilder()
+                        .setColor(0x0099FF)
+                        .setTitle(`🏏 Question ${qIndex + 1} of ${totalQuestions} (Multiplayer Match)`)
+                        .setDescription(q.question + '\n\n*📝 Note: 0 for incorrect, +1 for correct, +2 for 2-3 correct answers in a row.*')
+                        .setFooter({ text: `⏱️ Time remaining: ${qTimeLeft}s | Players active: ${joinedPlayers.size}` });
 
-                    const scores = loadScores();
-                    if (!scores.global) scores.global = {};
-                    if (!scores.guilds) scores.guilds = {};
-                    if (!scores.guilds[guildId]) scores.guilds[guildId] = {};
-                    
-                    if (!scores.global[i.user.id]) {
-                        scores.global[i.user.id] = { username: i.user.username, points: 0, lifetimeCorrect: 0, claimedMilestones: [] };
-                    }
-                    if (!scores.guilds[guildId][i.user.id]) {
-                        scores.guilds[guildId][i.user.id] = { username: i.user.username, points: 0 };
-                    }
+                    const questionMessage = await interaction.channel.send({ embeds: [qEmbed], components: [row] });
 
-                    scores.global[i.user.id].points += earned;
-                    scores.guilds[guildId][i.user.id].points += earned;
-                    
-                    if (!scores.global[i.user.id].lifetimeCorrect) scores.global[i.user.id].lifetimeCorrect = 0;
-                    if (!scores.global[i.user.id].claimedMilestones) scores.global[i.user.id].claimedMilestones = [];
-
-                    scores.global[i.user.id].lifetimeCorrect += 1;
-                    const totalCorrect = scores.global[i.user.id].lifetimeCorrect;
-
-                    saveScores(scores);
-
-                    const milestones = [50, 100, 200, 500];
-                    let milestoneHit = null;
-
-                    for (const m of milestones) {
-                        if (totalCorrect >= m && !scores.global[i.user.id].claimedMilestones.includes(m)) {
-                            scores.global[i.user.id].claimedMilestones.push(m);
-                            milestoneHit = m;
-                            saveScores(scores);
-                            break;
+                    const qInterval = setInterval(async () => {
+                        if (qTimeLeft <= 1) {
+                            clearInterval(qInterval);
+                            return;
                         }
-                    }
+                        qTimeLeft -= 1;
+                        qEmbed.setFooter({ text: `⏱️ Time remaining: ${qTimeLeft}s | Players active: ${joinedPlayers.size}` });
+                        await questionMessage.edit({ embeds: [qEmbed] }).catch(() => {});
+                    }, 1000);
 
-                    if (milestoneHit) {
+                    const answeredUsers = new Set();
+
+                    // Wait for the full round to complete before proceeding to the next question
+                    await new Promise(resolve => {
+                        const roundCollector = questionMessage.createMessageComponentCollector({ time: 10000 });
+
+                        roundCollector.on('collect', async i => {
+                            if (!joinedPlayers.has(i.user.id)) {
+                                return i.reply({ content: "❌ You did not join this match lobby! Wait for the next round.", flags: 64 }).catch(() => {});
+                            }
+
+                            if (answeredUsers.has(i.user.id)) {
+                                return i.reply({ content: "⚠️ You already answered this question!", flags: 64 }).catch(() => {});
+                            }
+
+                            await i.deferUpdate().catch(() => {});
+                            answeredUsers.add(i.user.id);
+
+                            const selectedIndex = parseInt(i.customId.split('_')[2]);
+                            const player = joinedPlayers.get(i.user.id);
+
+                            if (selectedIndex === correctIndex) {
+                                player.streak += 1;
+                                let earned = 1;
+                                let streakMsg = "";
+                                if (player.streak > 2) {
+                                    earned += 2; // +2 bonus if streak > 2 (i.e. 3 in a row)
+                                    streakMsg = ` 🔥 (${player.streak}x Streak! +2 bonus pts)`;
+                                }
+
+                                player.score += earned;
+
+                                const scores = loadScores();
+                                if (!scores.global) scores.global = {};
+                                if (!scores.guilds) scores.guilds = {};
+                                if (!scores.guilds[guildId]) scores.guilds[guildId] = {};
+                                
+                                if (!scores.global[i.user.id]) {
+                                    scores.global[i.user.id] = { username: i.user.username, points: 0, lifetimeCorrect: 0, claimedMilestones: [] };
+                                }
+                                if (!scores.guilds[guildId][i.user.id]) {
+                                    scores.guilds[guildId][i.user.id] = { username: i.user.username, points: 0 };
+                                }
+
+                                scores.global[i.user.id].points += earned;
+                                scores.guilds[guildId][i.user.id].points += earned;
+                                
+                                if (!scores.global[i.user.id].lifetimeCorrect) scores.global[i.user.id].lifetimeCorrect = 0;
+                                scores.global[i.user.id].lifetimeCorrect += 1;
+
+                                saveScores(scores);
+
+                                await i.followUp({ content: `🎉 **Correct Answer** (+${earned} pts).${streakMsg}`, flags: 64 }).catch(() => {});
+                            } else {
+                                player.streak = 0;
+                                await i.followUp({ content: `❌ **Incorrect Answer**! The correct answer was **${q.options[correctIndex]}**. Streak reset.`, flags: 64 }).catch(() => {});
+                            }
+                        });
+
+                        roundCollector.on('end', async () => {
+                            clearInterval(qInterval);
+
+                            const disabledQRow = new ActionRowBuilder();
+                            q.options.forEach((option, index) => {
+                                let style = ButtonStyle.Secondary;
+                                if (index === correctIndex) style = ButtonStyle.Success;
+                                disabledQRow.addComponents(
+                                    new ButtonBuilder()
+                                        .setCustomId(`dis_${index}`)
+                                        .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
+                                        .setStyle(style)
+                                        .setDisabled(true)
+                                );
+                            });
+
+                            await questionMessage.edit({
+                                content: `🔒 **Time's up for Question ${qIndex + 1}!** Correct Answer: **${q.options[correctIndex]}**`,
+                                components: [disabledQRow]
+                            }).catch(() => {});
+
+                            setTimeout(resolve, 2000); // Wait 2 seconds before moving to the next question
+                        });
+                    });
+                }
+
+                const sortedMatchPlayers = Array.from(joinedPlayers.entries()).sort((a, b) => b[1].score - a[1].score);
+                let summaryDesc = sortedMatchPlayers.map(([userId, p], idx) => {
+                    const medal = index === 0 ? '🏆' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
+                    return `${medal} **${p.username}** — **${p.score} points**`;
+                }).join('\n');
+
+                const summaryEmbed = new EmbedBuilder()
+                    .setColor(0xFFD700)
+                    .setTitle('🏁 Multiplayer Match Complete!')
+                    .setDescription(`Here are the final standings for this session:\n\n${summaryDesc}`)
+                    .setFooter({ text: 'Check overall standings using /leaderboard or /global-leaderboard' });
+
+                await interaction.channel.send({ embeds: [summaryEmbed] });
+
+                const SCORE_THRESHOLD = totalQuestions === 5 ? 3 : 7;
+                const eligibleWinners = sortedMatchPlayers.filter(([userId, data]) => data.score >= SCORE_THRESHOLD);
+
+                if (eligibleWinners.length > 0) {
+                    for (const [winnerId, winnerData] of eligibleWinners) {
                         const packRow = new ActionRowBuilder().addComponents(
                             new ButtonBuilder()
-                                .setCustomId(`open_pack_${i.user.id}`)
-                                .setLabel('🎁 Open Milestone Pack')
+                                .setCustomId(`open_pack_${winnerId}`)
+                                .setLabel('🎁 Open Pack Now')
                                 .setStyle(ButtonStyle.Success),
                             new ButtonBuilder()
-                                .setCustomId(`save_pack_${i.user.id}`)
+                                .setCustomId(`save_pack_${winnerId}`)
                                 .setLabel('🎒 Save for Later')
                                 .setStyle(ButtonStyle.Secondary)
                         );
 
                         const packEmbed = new EmbedBuilder()
-                            .setColor(0xFFD700)
-                            .setTitle('🌟 Career Milestone Reached!')
-                            .setDescription(`Incredible dedication! You have reached **${milestoneHit} total correct answers** career-wide and unlocked a **Bonus Player Pack**!`);
+                            .setColor(0x00FFCC)
+                            .setTitle('🎁 Match Reward Unlocked!')
+                            .setDescription(`Congratulations <@${winnerId}>! You scored **${winnerData.score} points** (meeting the threshold) and earned **1x Cricket Player Pack**.`);
 
-                        await i.followUp({ content: `🎉 Correct! (+${earned} pts).${streakMsg}`, embeds: [packEmbed], components: [packRow], flags: 64 }).catch(() => {});
-                    } else {
-                        await i.followUp({ content: `🎉 Correct! (+${earned} pts).${streakMsg} *(Career Correct: ${totalCorrect})*`, flags: 64 }).catch(() => {});
+                        await interaction.channel.send({ content: `<@${winnerId}>`, embeds: [packEmbed], components: [packRow] });
                     }
-                } else {
-                    player.streak = 0;
-                    await i.followUp({ content: `❌ Incorrect! The correct answer was **${q.options[correctIndex]}**. Streak reset.`, flags: 64 }).catch(() => {});
                 }
-            });
-
-                await new Promise(resolve => {
-                    roundCollector.on('end', async () => {
-                        clearInterval(qInterval);
-
-                        const disabledQRow = new ActionRowBuilder();
-                        q.options.forEach((option, index) => {
-                            let style = ButtonStyle.Secondary;
-                            if (index === correctIndex) style = ButtonStyle.Success;
-                            disabledQRow.addComponents(
-                                new ButtonBuilder()
-                                    .setCustomId(`dis_${index}`)
-                                    .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
-                                    .setStyle(style)
-                                    .setDisabled(true)
-                            );
-                        });
-
-                        await questionMessage.edit({
-                            content: `🔒 **Time's up for Question ${qIndex + 1}!** Correct Answer: **${q.options[correctIndex]}**`,
-                            components: [disabledQRow]
-                        }).catch(() => {});
-
-                        setTimeout(resolve, 2000);
-                    });
-                });
-            }
-
-            const sortedMatchPlayers = Array.from(joinedPlayers.entries()).sort((a, b) => b[1].score - a[1].score);
-            let summaryDesc = sortedMatchPlayers.map(([userId, p], idx) => {
-                const medal = idx === 0 ? '🏆' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
-                return `${medal} **${p.username}** — **${p.score} points**`;
-            }).join('\n');
-
-            const summaryEmbed = new EmbedBuilder()
-                .setColor(0xFFD700)
-                .setTitle('🏁 Multiplayer Match Complete!')
-                .setDescription(`Here are the final standings for this session:\n\n${summaryDesc}`)
-                .setFooter({ text: 'Check overall standings using /leaderboard or /global-leaderboard' });
-
-            await interaction.channel.send({ embeds: [summaryEmbed] });
-
-            const SCORE_THRESHOLD = 3;
-            const eligibleWinners = sortedMatchPlayers.filter(([userId, data]) => data.score >= SCORE_THRESHOLD);
-
-            if (eligibleWinners.length > 0) {
-                for (const [winnerId, winnerData] of eligibleWinners) {
-                    const packRow = new ActionRowBuilder().addComponents(
-                        new ButtonBuilder()
-                            .setCustomId(`open_pack_${winnerId}`)
-                            .setLabel('🎁 Open Pack Now')
-                            .setStyle(ButtonStyle.Success),
-                        new ButtonBuilder()
-                            .setCustomId(`save_pack_${winnerId}`)
-                            .setLabel('🎒 Save for Later')
-                            .setStyle(ButtonStyle.Secondary)
-                    );
-
-                    const packEmbed = new EmbedBuilder()
-                        .setColor(0x00FFCC)
-                        .setTitle('🎁 Match Reward Unlocked!')
-                        .setDescription(`Congratulations <@${winnerId}>! You scored **${winnerData.score} points** (meeting the threshold) and earned **1x Cricket Player Pack**.`);
-
-                    await interaction.channel.send({ content: `<@${winnerId}>`, embeds: [packEmbed], components: [packRow] });
-                }
+            } finally {
+                // Always release the channel lock when finished
+                global.activeQuizChannels.delete(interaction.channelId);
             }
         }
     }
