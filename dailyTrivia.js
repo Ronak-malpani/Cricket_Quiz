@@ -33,7 +33,7 @@ function startDailyTriviaScheduler(client) {
 
 async function triggerAutomatedQotd(client, specificChannel = null) {
     try {
-        const questions = await getCricketQuestions(1);
+        const questions = await getCricketQuestions(3);
         if (!questions || questions.length === 0) return;
         const q = questions[0];
 
