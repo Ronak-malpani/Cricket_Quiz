@@ -2,7 +2,6 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { getCricketQuestions } = require('./fetchQuestions');
 const { dropCardReward } = require('./economy.js');
-const { startDailyTriviaScheduler, handleDailyTriviaInteraction, triggerAutomatedQotd } = require('./dailyTrivia');
 const fs = require('fs');
 
 // Express server setup for 24/7 uptime
@@ -65,7 +64,6 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
 client.once('clientReady', async () => {
     console.log(`Bot logged in as ${client.user.tag}`);
-    startDailyTriviaScheduler(client);
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Successfully registered global application slash commands.');
@@ -77,21 +75,24 @@ client.once('clientReady', async () => {
 client.on('interactionCreate', async interaction => {
     // 1. Handle Button Interactions Separately
     if (interaction.isButton()) {
+        const customId = interaction.customId;
+
+        // CRITICAL FIX: Instantly ignore lobby, disabled buttons, and match quiz answers (q_) so they NEVER trigger pack checks
         if (
-            interaction.customId === 'join_lobby' || 
-            interaction.customId === 'leave_lobby' || 
-            interaction.customId === 'start_now' || 
-            interaction.customId === 'cancel_match' || 
-            interaction.customId === 'transfer_host' || 
-            interaction.customId.startsWith('q_') || 
-            interaction.customId.startsWith('dis_')
+            customId === 'join_lobby' || 
+            customId === 'leave_lobby' || 
+            customId === 'start_now' || 
+            customId === 'cancel_match' || 
+            customId === 'transfer_host' || 
+            customId.startsWith('q_') || 
+            customId.startsWith('dis_')
         ) {
             return; 
         }
 
-        // Handle QOTD button answers (30s timed daily question)
-        if (interaction.customId.startsWith('qotd_')) {
-            const [, qIdx, selectedOpt, correctOpt, authorId] = interaction.customId.split('_');
+        // Handle QOTD button answers
+        if (customId.startsWith('qotd_')) {
+            const [, qIdx, selectedOpt, correctOpt, authorId] = customId.split('_');
             const userId = interaction.user.id;
 
             let invDb = { users: {} };
@@ -114,11 +115,12 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        if (!interaction.customId.startsWith('open_pack_') && !interaction.customId.startsWith('save_pack_') && !interaction.customId.startsWith('invopen_pack_')) {
+        // Handle Pack Opening / Saving Buttons strictly
+        if (!customId.startsWith('open_pack_') && !customId.startsWith('save_pack_') && !customId.startsWith('invopen_pack_')) {
             return;
         }
 
-        const parts = interaction.customId.split('_');
+        const parts = customId.split('_');
         const action = parts[0]; 
         const targetUserId = parts[parts.length - 1]; 
 
@@ -233,7 +235,9 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (commandName === 'qotd') {
-            await interaction.deferReply();
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.deferReply();
+            }
             const questions = await getCricketQuestions(1);
             const q = questions[0];
 
@@ -491,7 +495,7 @@ client.on('interactionCreate', async interaction => {
                     const qEmbed = new EmbedBuilder()
                         .setColor(0x0099FF)
                         .setTitle(`🏏 Question ${qIndex + 1} of ${totalQuestions} (Multiplayer Match)`)
-                        .setDescription(q.question + '\n\n*📝 Note: 0 for incorrect, +1 for correct, +2 for 2-3 correct answers in a row.*')
+                        .setDescription(q.question + '\n\n*📝 Note: 0 for incorrect, +1 for correct, +2 for streak bonus!*')
                         .setFooter({ text: `⏱️ Time remaining: ${qTimeLeft}s | Players active: ${joinedPlayers.size}` });
 
                     const questionMessage = await interaction.channel.send({ embeds: [qEmbed], components: [row] });
@@ -513,6 +517,9 @@ client.on('interactionCreate', async interaction => {
                         const roundCollector = questionMessage.createMessageComponentCollector({ time: 10000 });
 
                         roundCollector.on('collect', async i => {
+                            // Ensure only 'q_' buttons for this round are handled
+                            if (!i.customId.startsWith('q_')) return;
+
                             if (!joinedPlayers.has(i.user.id)) {
                                 return i.reply({ content: "❌ You did not join this match lobby! Wait for the next round.", flags: 64 }).catch(() => {});
                             }
@@ -532,7 +539,7 @@ client.on('interactionCreate', async interaction => {
                                 let earned = 1;
                                 let streakMsg = "";
                                 if (player.streak > 2) {
-                                    earned += 2; // +2 bonus if streak > 2 (i.e. 3 in a row)
+                                    earned += 2; 
                                     streakMsg = ` 🔥 (${player.streak}x Streak! +2 bonus pts)`;
                                 }
 
@@ -593,7 +600,7 @@ client.on('interactionCreate', async interaction => {
 
                 const sortedMatchPlayers = Array.from(joinedPlayers.entries()).sort((a, b) => b[1].score - a[1].score);
                 let summaryDesc = sortedMatchPlayers.map(([userId, p], idx) => {
-                    const medal = index === 0 ? '🏆' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
+                    const medal = idx === 0 ? '🏆' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
                     return `${medal} **${p.username}** — **${p.score} points**`;
                 }).join('\n');
 
