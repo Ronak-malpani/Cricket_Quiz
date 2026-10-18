@@ -90,7 +90,8 @@ client.on('interactionCreate', async interaction => {
             customId === 'cancel_match' || 
             customId === 'transfer_host' || 
             customId.startsWith('q_') || 
-            customId.startsWith('dis_')
+            customId.startsWith('dis_') ||
+            customId.startsWith('qotd_')
         ) {
             return; 
         }

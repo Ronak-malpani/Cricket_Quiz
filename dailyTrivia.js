@@ -55,7 +55,7 @@ async function triggerAutomatedQotd(client, specificChannel = null) {
             .setFooter({ text: 'Automated daily community challenge' });
 
         const roleId = process.env.QOTD_ROLE_ID;
-        const rolePingMention = roleId ? `<@&${roleId}>` : '@everyone';
+        const rolePingMention = (roleId && roleId.trim() !== '') ? `<@&${roleId}>` : '@everyone';
 
         // If a specific channel was passed (like from /qotd), post directly there!
         if (specificChannel) {
