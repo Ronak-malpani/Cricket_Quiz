@@ -2,6 +2,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { getCricketQuestions } = require('./fetchQuestions');
 const { dropCardReward } = require('./economy.js');
+const { startDailyTriviaScheduler,triggerAutomatedQotd,handleDailyTriviaInteraction } = require('./dailyTrivia');
 const fs = require('fs');
 
 // Express server setup for 24/7 uptime
@@ -64,6 +65,7 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
 client.once('clientReady', async () => {
     console.log(`Bot logged in as ${client.user.tag}`);
+    startDailyTriviaScheduler(client);
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Successfully registered global application slash commands.');
@@ -73,6 +75,9 @@ client.once('clientReady', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
+    // Catch automated daily trivia buttons first
+    if (interaction.isButton() && handleDailyTriviaInteraction(interaction)) return;
+
     // 1. Handle Button Interactions Separately
     if (interaction.isButton()) {
         const customId = interaction.customId;
@@ -90,7 +95,7 @@ client.on('interactionCreate', async interaction => {
             return; 
         }
 
-        // Handle QOTD button answers
+        // Handle manual QOTD button answers
         if (customId.startsWith('qotd_')) {
             const [, qIdx, selectedOpt, correctOpt, authorId] = customId.split('_');
             const userId = interaction.user.id;
@@ -234,47 +239,9 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ embeds: [invEmbed], components: invRows, flags: 64 });
         }
 
-        if (commandName === 'qotd') {
-            if (!interaction.deferred && !interaction.replied) {
-                await interaction.deferReply();
-            }
-            const questions = await getCricketQuestions(1);
-            const q = questions[0];
-
-            const row = new ActionRowBuilder();
-            q.options.forEach((option, index) => {
-                row.addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`qotd_0_${index}_${q.answer}_${interaction.user.id}`)
-                        .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
-                        .setStyle(ButtonStyle.Primary)
-                );
-            });
-
-            const qotdEmbed = new EmbedBuilder()
-                .setColor(0xFF5733)
-                .setTitle('⭐ Daily Cricket Question of the Day (QOTD)')
-                .setDescription(q.question + '\n\n*⏱️ You have **30 seconds** to answer!* \n*📝 Note: +1 Correct / 0 Incorrect tracking applies. Answer correctly to win **50 Cricket Avengers Coins**!*')
-                .setFooter({ text: 'Daily community trivia challenge' });
-
-            const qotdMsg = await interaction.editReply({ content: '@everyone 🚨 **New Daily QOTD Challenge is Live!**', embeds: [qotdEmbed], components: [row] });
-
-            const qotdCollector = qotdMsg.createMessageComponentCollector({ time: 30000 });
-            qotdCollector.on('end', async () => {
-                const disabledRow = new ActionRowBuilder();
-                q.options.forEach((option, index) => {
-                    let style = ButtonStyle.Secondary;
-                    if (index === q.answer) style = ButtonStyle.Success;
-                    disabledRow.addComponents(
-                        new ButtonBuilder()
-                            .setCustomId(`qotd_dis_${index}`)
-                            .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
-                            .setStyle(style)
-                            .setDisabled(true)
-                    );
-                });
-                await qotdMsg.edit({ content: '🔒 **QOTD Closed!** Time is up for today\'s question.', components: [disabledRow] }).catch(() => {});
-            });
+       if (commandName === 'qotd') {
+            await interaction.reply({ content: '🚀 Triggering QOTD with live countdown...', flags: 64 }).catch(() => {});
+            await triggerAutomatedQotd(client, interaction.channel);
             return;
         }
 

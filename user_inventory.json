@@ -9,7 +9,7 @@
       "active_card": "msd_2011"
     },
     "1006650469294280774": {
-      "coins": 300,
+      "coins": 450,
       "inventory": [
         "kohli_2016",
         "rohit_2019",
@@ -19,7 +19,7 @@
         "rohit_2019"
       ],
       "active_card": null,
-      "unopened_packs": 1
+      "unopened_packs": 2
     }
   }
 }

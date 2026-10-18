@@ -31,7 +31,7 @@ function startDailyTriviaScheduler(client) {
     }, 60000); // Checks every 1 minute
 }
 
-async function triggerAutomatedQotd(client) {
+async function triggerAutomatedQotd(client, specificChannel = null) {
     try {
         const questions = await getCricketQuestions(1);
         if (!questions || questions.length === 0) return;
@@ -47,38 +47,31 @@ async function triggerAutomatedQotd(client) {
             );
         });
 
+        let timeLeft = 30;
         const qotdEmbed = new EmbedBuilder()
             .setColor(0xFF5733)
             .setTitle('⭐ Scheduled Daily Cricket Trivia Challenge')
-            .setDescription(q.question + '\n\n*⏱️ You have **30 seconds** to answer!* \n*📝 Answer correctly to win **+50 Cricket Avengers Coins**!*')
+            .setDescription(q.question + `\n\n*⏱️ Time remaining: **${timeLeft}s** to answer!* \n*📝 Note: You have **30 seconds** to answer! Answer correctly to win **+50 Cricket Avengers Coins**!*`)
             .setFooter({ text: 'Automated daily community challenge' });
 
         const roleId = process.env.QOTD_ROLE_ID;
         const rolePingMention = roleId ? `<@&${roleId}>` : '@everyone';
 
+        // If a specific channel was passed (like from /qotd), post directly there!
+        if (specificChannel) {
+            const qotdMsg = await specificChannel.send({ content: `${rolePingMention} 🚨 **New Daily QOTD Challenge is Live!**`, embeds: [qotdEmbed], components: [row] });
+            startTimerAndCollector(qotdMsg, q, timeLeft, qotdEmbed);
+            return;
+        }
+
+        // Otherwise, run the automated loop across guilds
         for (const guild of client.guilds.cache.values()) {
             try {
                 const targetChannel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages'));
                 if (!targetChannel) continue;
 
                 const qotdMsg = await targetChannel.send({ content: `${rolePingMention} 🚨 **New Scheduled Daily Trivia is Live!**`, embeds: [qotdEmbed], components: [row] });
-
-                const qotdCollector = qotdMsg.createMessageComponentCollector({ time: 30000 });
-                qotdCollector.on('end', async () => {
-                    const disabledRow = new ActionRowBuilder();
-                    q.options.forEach((option, index) => {
-                        let style = ButtonStyle.Secondary;
-                        if (index === q.answer) style = ButtonStyle.Success;
-                        disabledRow.addComponents(
-                            new ButtonBuilder()
-                                .setCustomId(`qotd_dis_${index}`)
-                                .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
-                                .setStyle(style)
-                                .setDisabled(true)
-                        );
-                    });
-                    await qotdMsg.edit({ content: '🔒 **Trivia Closed!** Time is up for this question.', components: [disabledRow] }).catch(() => {});
-                });
+                startTimerAndCollector(qotdMsg, q, timeLeft, qotdEmbed);
             } catch (guildErr) {
                 console.error(`Failed to send automated QOTD in guild ${guild.name}:`, guildErr);
             }
@@ -88,13 +81,51 @@ async function triggerAutomatedQotd(client) {
     }
 }
 
+function startTimerAndCollector(qotdMsg, q, timeLeft, qotdEmbed) {
+    const timerInterval = setInterval(async () => {
+        timeLeft -= 1;
+        if (timeLeft >= 0) {
+            qotdEmbed.setDescription(q.question + `\n\n*⏱️ Time remaining: **${timeLeft}s** to answer!* \n*📝 Note: You have **30 seconds** to answer! Answer correctly to win **+50 Cricket Avengers Coins**!*`);
+            await qotdMsg.edit({ embeds: [qotdEmbed] }).catch(() => {});
+        } else {
+            clearInterval(timerInterval);
+        }
+    }, 1000);
+
+    const qotdCollector = qotdMsg.createMessageComponentCollector({ time: 30000 });
+    qotdCollector.on('end', async () => {
+        clearInterval(timerInterval);
+        const disabledRow = new ActionRowBuilder();
+        q.options.forEach((option, index) => {
+            let style = ButtonStyle.Secondary;
+            if (index === q.answer) style = ButtonStyle.Success;
+            disabledRow.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`qotd_dis_${index}`)
+                    .setLabel(`${String.fromCharCode(65 + index)}: ${option.substring(0, 65)}`)
+                    .setStyle(style)
+                    .setDisabled(true)
+            );
+        });
+        await qotdMsg.edit({ content: '🔒 **Trivia Closed!** Time is up for this question.', components: [disabledRow] }).catch(() => {});
+    });
+}
+
+// Security: Prevent users from answering the same automated trivia question twice
+const answeredAutoTriviaUsers = new Set();
+
 function handleDailyTriviaInteraction(interaction) {
-    if (!interaction.isButton() || !interaction.customId.startsWith('qotd_')) return false;
+    if (!interaction.isButton() || !interaction.customId.startsWith('qotd_auto_')) return false;
+
+    const userId = interaction.user.id;
+    if (answeredAutoTriviaUsers.has(userId)) {
+        interaction.reply({ content: '⚠️ You have already answered this trivia question!', flags: 64 }).catch(() => {});
+        return true;
+    }
 
     const parts = interaction.customId.split('_');
     const selectedOpt = parts[2];
     const correctOpt = parts[3];
-    const userId = interaction.user.id;
 
     let invDb = { users: {} };
     if (fs.existsSync(INVENTORY_FILE)) {
@@ -106,6 +137,8 @@ function handleDailyTriviaInteraction(interaction) {
 
     const selectedIndex = parseInt(selectedOpt);
     const correctIndex = parseInt(correctOpt);
+
+    answeredAutoTriviaUsers.add(userId);
 
     if (selectedIndex === correctIndex) {
         invDb.users[userId].coins += 50; 
