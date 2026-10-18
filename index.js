@@ -91,7 +91,8 @@ client.on('interactionCreate', async interaction => {
             customId === 'transfer_host' || 
             customId.startsWith('q_') || 
             customId.startsWith('dis_') ||
-            customId.startsWith('qotd_')
+            customId.startsWith('qotd_') ||
+            customId.startsWith('qotd_auto_')
         ) {
             return; 
         }
