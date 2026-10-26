@@ -38,39 +38,38 @@ async function triggerAutomatedQotd(client, specificChannel = null) {
 
         const roleId = process.env.QOTD_ROLE_ID;
 
-        // Post all 3 questions one by one
+        // Post all 3 questions sequentially
         for (let i = 0; i < questions.length; i++) {
             const q = questions[i];
             const qNum = i + 1;
 
             if (specificChannel) {
-                let specificRoleMention = '@everyone';
+                let roleMention = '@everyone';
                 if (roleId && roleId.trim() !== '' && roleId !== 'undefined') {
                     if (specificChannel.guild && specificChannel.guild.roles.cache.has(roleId)) {
-                        specificRoleMention = `<@&${roleId}>`;
+                        roleMention = `<@&${roleId}>`;
                     }
                 }
-                await postAndRunQuestion(specificChannel, q, specificRoleMention, qNum);
+                await postAndRunQuestion(specificChannel, q, roleMention, qNum);
             } else {
                 for (const guild of client.guilds.cache.values()) {
                     try {
                         const targetChannel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages'));
                         if (!targetChannel) continue;
 
-                        // Check if role exists in this specific guild, otherwise fallback to @everyone
-                        let guildRoleMention = '@everyone';
+                        let roleMention = '@everyone';
                         if (roleId && roleId.trim() !== '' && roleId !== 'undefined') {
                             if (guild.roles.cache.has(roleId)) {
-                                guildRoleMention = `<@&${roleId}>`;
+                                roleMention = `<@&${roleId}>`;
                             }
                         }
 
-                        postAndRunQuestion(targetChannel, q, guildRoleMention, qNum);
+                        postAndRunQuestion(targetChannel, q, roleMention, qNum);
                     } catch (guildErr) {
                         console.error(`Failed to send automated QOTD in guild ${guild.name}:`, guildErr);
                     }
                 }
-                // Wait 30 seconds before posting the next automated question
+                // Wait 30 seconds before posting the next question
                 await new Promise(r => setTimeout(r, 30000));
             }
         }
