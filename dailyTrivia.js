@@ -5,7 +5,6 @@ const fs = require('fs');
 const INVENTORY_FILE = './user_inventory.json';
 
 function startDailyTriviaScheduler(client) {
-    // Schedule Trivia 4 times a day: 8:00 AM, 1:00 PM, 6:00 PM, and 9:00 PM IST
     setInterval(() => {
         const now = new Date();
         const utcHours = now.getUTCHours();
@@ -28,7 +27,7 @@ function startDailyTriviaScheduler(client) {
                 break;
             }
         }
-    }, 60000); // Checks every 1 minute
+    }, 60000);
 }
 
 async function triggerAutomatedQotd(client, specificChannel = null) {
@@ -55,22 +54,30 @@ async function triggerAutomatedQotd(client, specificChannel = null) {
             .setFooter({ text: 'Automated daily community challenge' });
 
         const roleId = process.env.QOTD_ROLE_ID;
-        const rolePingMention = (roleId && roleId.trim() !== '') ? `<@&${roleId}>` : '@everyone';
+        const rolePingMention = (roleId && roleId.trim() !== '' && roleId !== 'undefined') ? `<@&${roleId}>` : '@everyone';
 
-        // If a specific channel was passed (like from /qotd), post directly there!
         if (specificChannel) {
-            const qotdMsg = await specificChannel.send({ content: `${rolePingMention} 🚨 **New Daily QOTD Challenge is Live!**`, embeds: [qotdEmbed], components: [row] });
+            const qotdMsg = await specificChannel.send({ 
+                content: `${rolePingMention} 🚨 **New Daily QOTD Challenge is Live!**`, 
+                embeds: [qotdEmbed], 
+                components: [row], 
+                allowedMentions: { parse: ['everyone', 'roles'] } 
+            });
             startTimerAndCollector(qotdMsg, q, timeLeft, qotdEmbed);
             return;
         }
 
-        // Otherwise, run the automated loop across guilds
         for (const guild of client.guilds.cache.values()) {
             try {
                 const targetChannel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages'));
                 if (!targetChannel) continue;
 
-                const qotdMsg = await targetChannel.send({ content: `${rolePingMention} 🚨 **New Scheduled Daily Trivia is Live!**`, embeds: [qotdEmbed], components: [row] });
+                const qotdMsg = await targetChannel.send({ 
+                    content: `${rolePingMention} 🚨 **New Scheduled Daily Trivia is Live!**`, 
+                    embeds: [qotdEmbed], 
+                    components: [row], 
+                    allowedMentions: { parse: ['everyone', 'roles'] } 
+                });
                 startTimerAndCollector(qotdMsg, q, timeLeft, qotdEmbed);
             } catch (guildErr) {
                 console.error(`Failed to send automated QOTD in guild ${guild.name}:`, guildErr);
@@ -111,14 +118,20 @@ function startTimerAndCollector(qotdMsg, q, timeLeft, qotdEmbed) {
     });
 }
 
-// Security: Prevent users from answering the same automated trivia question twice
-const answeredAutoTriviaUsers = new Set();
+// Track answered users per specific message ID so future trivia works normally
+const answeredTriviaMap = new Map();
 
 function handleDailyTriviaInteraction(interaction) {
     if (!interaction.isButton() || !interaction.customId.startsWith('qotd_auto_')) return false;
 
     const userId = interaction.user.id;
-    if (answeredAutoTriviaUsers.has(userId)) {
+    const messageId = interaction.message.id;
+
+    if (!answeredTriviaMap.has(messageId)) {
+        answeredTriviaMap.set(messageId, new Set());
+    }
+
+    if (answeredTriviaMap.get(messageId).has(userId)) {
         interaction.reply({ content: '⚠️ You have already answered this trivia question!', flags: 64 }).catch(() => {});
         return true;
     }
@@ -138,7 +151,7 @@ function handleDailyTriviaInteraction(interaction) {
     const selectedIndex = parseInt(selectedOpt);
     const correctIndex = parseInt(correctOpt);
 
-    answeredAutoTriviaUsers.add(userId);
+    answeredTriviaMap.get(messageId).add(userId);
 
     if (selectedIndex === correctIndex) {
         invDb.users[userId].coins += 50; 
