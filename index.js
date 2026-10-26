@@ -65,7 +65,12 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
 client.once('clientReady', async () => {
     console.log(`Bot logged in as ${client.user.tag}`);
-    startDailyTriviaScheduler(client);
+    if (!global.triviaSchedulerStarted) {
+        global.triviaSchedulerStarted = true;
+        startDailyTriviaScheduler(client);
+        console.log('Daily Trivia Scheduler started successfully.');
+    }
+
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Successfully registered global application slash commands.');
