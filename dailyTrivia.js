@@ -37,7 +37,6 @@ async function triggerAutomatedQotd(client, specificChannel = null) {
         if (!questions || questions.length === 0) return;
 
         const roleId = process.env.QOTD_ROLE_ID;
-        const rolePingMention = (roleId && roleId.trim() !== '' && roleId !== 'undefined') ? `<@&${roleId}>` : '@everyone';
 
         // Post all 3 questions one by one
         for (let i = 0; i < questions.length; i++) {
@@ -45,14 +44,28 @@ async function triggerAutomatedQotd(client, specificChannel = null) {
             const qNum = i + 1;
 
             if (specificChannel) {
-                await postAndRunQuestion(specificChannel, q, rolePingMention, qNum);
+                let specificRoleMention = '@everyone';
+                if (roleId && roleId.trim() !== '' && roleId !== 'undefined') {
+                    if (specificChannel.guild && specificChannel.guild.roles.cache.has(roleId)) {
+                        specificRoleMention = `<@&${roleId}>`;
+                    }
+                }
+                await postAndRunQuestion(specificChannel, q, specificRoleMention, qNum);
             } else {
                 for (const guild of client.guilds.cache.values()) {
                     try {
                         const targetChannel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages'));
                         if (!targetChannel) continue;
 
-                        postAndRunQuestion(targetChannel, q, rolePingMention, qNum);
+                        // Check if role exists in this specific guild, otherwise fallback to @everyone
+                        let guildRoleMention = '@everyone';
+                        if (roleId && roleId.trim() !== '' && roleId !== 'undefined') {
+                            if (guild.roles.cache.has(roleId)) {
+                                guildRoleMention = `<@&${roleId}>`;
+                            }
+                        }
+
+                        postAndRunQuestion(targetChannel, q, guildRoleMention, qNum);
                     } catch (guildErr) {
                         console.error(`Failed to send automated QOTD in guild ${guild.name}:`, guildErr);
                     }
