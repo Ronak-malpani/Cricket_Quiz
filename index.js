@@ -2,7 +2,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { getCricketQuestions } = require('./fetchQuestions');
 const { dropCardReward } = require('./economy.js');
-const { startDailyTriviaScheduler,triggerAutomatedQotd,handleDailyTriviaInteraction } = require('./dailyTrivia');
+const { startDailyTriviaScheduler, triggerAutomatedQotd, handleDailyTriviaInteraction } = require('./dailyTrivia');
 const fs = require('fs');
 
 // Express server setup for 24/7 uptime
@@ -75,14 +75,13 @@ client.once('clientReady', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
-    // Catch automated daily trivia buttons first
     if (interaction.isButton() && handleDailyTriviaInteraction(interaction)) return;
 
     // 1. Handle Button Interactions Separately
     if (interaction.isButton()) {
         const customId = interaction.customId;
 
-        // CRITICAL FIX: Instantly ignore lobby, disabled buttons, and match quiz answers (q_) so they NEVER trigger pack checks
+        // Ignore lobby, disabled buttons, match quiz answers, and automated QOTD buttons
         if (
             customId === 'join_lobby' || 
             customId === 'leave_lobby' || 
@@ -91,7 +90,6 @@ client.on('interactionCreate', async interaction => {
             customId === 'transfer_host' || 
             customId.startsWith('q_') || 
             customId.startsWith('dis_') ||
-            customId.startsWith('qotd_') ||
             customId.startsWith('qotd_auto_')
         ) {
             return; 
@@ -122,8 +120,7 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        // Handle Pack Opening / Saving Buttons strictly
-        if (!customId.startsWith('open_pack_') && !customId.startsWith('save_pack_') && !customId.startsWith('invopen_pack_')) {
+        if (!customId.startsWith('invopen_pack_')) {
             return;
         }
 
@@ -132,23 +129,19 @@ client.on('interactionCreate', async interaction => {
         const targetUserId = parts[parts.length - 1]; 
 
         if (interaction.user.id !== targetUserId) {
-            return interaction.reply({ content: '❌ This pack does not belong to you!', flags: 64 }).catch(() => {});
+            return interaction.reply({ content: '❌ This inventory does not belong to you!', flags: 64 }).catch(() => {});
         }
 
-        if (action === 'open' || action === 'invopen') {
-            await interaction.deferUpdate().catch(() => {});
-
-            if (action === 'invopen') {
-                let db = { users: {} };
-                if (fs.existsSync(INVENTORY_FILE)) {
-                    db = JSON.parse(fs.readFileSync(INVENTORY_FILE, 'utf8'));
-                }
-                if (!db.users[targetUserId] || db.users[targetUserId].unopened_packs <= 0) {
-                    return interaction.followUp({ content: '❌ You have no unopened packs left!', flags: 64 }).catch(() => {});
-                }
-                db.users[targetUserId].unopened_packs -= 1;
-                fs.writeFileSync(INVENTORY_FILE, JSON.stringify(db, null, 2));
+        if (action === 'invopen') {
+            let db = { users: {} };
+            if (fs.existsSync(INVENTORY_FILE)) {
+                db = JSON.parse(fs.readFileSync(INVENTORY_FILE, 'utf8'));
             }
+            if (!db.users[targetUserId] || db.users[targetUserId].unopened_packs <= 0) {
+                return interaction.reply({ content: '❌ You have no unopened packs left!', flags: 64 }).catch(() => {});
+            }
+            db.users[targetUserId].unopened_packs -= 1;
+            fs.writeFileSync(INVENTORY_FILE, JSON.stringify(db, null, 2));
 
             const unlockedCard = dropCardReward(targetUserId);
 
@@ -158,33 +151,10 @@ client.on('interactionCreate', async interaction => {
                 .setImage(unlockedCard.image)
                 .setColor(0xFFD700);
 
-            if (action === 'invopen') {
-                return interaction.editReply({ content: '🎁 Successfully opened a saved pack from your inventory!', embeds: [cardEmbed], components: [] });
-            }
-
-            return interaction.editReply({ embeds: [cardEmbed], components: [] });
-        } 
-        
-        if (action === 'save') {
-            await interaction.deferUpdate().catch(() => {});
-            let db = { users: {} };
-            if (fs.existsSync(INVENTORY_FILE)) {
-                db = JSON.parse(fs.readFileSync(INVENTORY_FILE, 'utf8'));
-            }
-            if (!db.users[targetUserId]) {
-                db.users[targetUserId] = { coins: 0, inventory: [], unopened_packs: 0 };
-            }
-            if (!db.users[targetUserId].unopened_packs) {
-                db.users[targetUserId].unopened_packs = 0;
-            }
-            db.users[targetUserId].unopened_packs += 1;
-            fs.writeFileSync(INVENTORY_FILE, JSON.stringify(db, null, 2));
-
-            return interaction.editReply({ content: '🎒 Pack saved safely to your inventory! Use `/inventory` to open it later.', embeds: [], components: [] });
+            return interaction.update({ content: '🎁 Successfully opened a saved pack from your inventory!', embeds: [cardEmbed], components: [] }).catch(() => {});
         }
         return;
     }
-
     // 2. Handle Slash Commands Separately
     if (interaction.isChatInputCommand()) {
         const { commandName, guildId } = interaction;
@@ -238,7 +208,7 @@ client.on('interactionCreate', async interaction => {
                 invRows.push(openSavedRow);
             }
 
-            return interaction.reply({ embeds: [invEmbed], components: invRows, flags: 64 });
+            return await interaction.reply({ embeds: [invEmbed], components: invRows, flags: 64 }).catch(() => {});
         }
 
        if (commandName === 'qotd') {
@@ -256,7 +226,7 @@ client.on('interactionCreate', async interaction => {
                 .slice(0, 10);
 
             if (sortedUsers.length === 0) {
-                return interaction.reply({ content: "🏆 No scores recorded in this server yet! Run `/quiz` to start playing.", flags: 64 });
+                return await interaction.reply({ content: "🏆 No scores recorded in this server yet! Run `/quiz` to start playing.", flags: 64 }).catch(() => {});
             }
 
             let description = sortedUsers.map(([id, data], index) => {
@@ -270,7 +240,7 @@ client.on('interactionCreate', async interaction => {
                 .setDescription(description)
                 .setFooter({ text: 'Play /quiz to climb this server\'s ranks!' });
 
-            return interaction.reply({ embeds: [lbEmbed] });
+            return await interaction.reply({ embeds: [lbEmbed] }).catch(() => {});
         }
 
         if (commandName === 'global-leaderboard') {
@@ -282,7 +252,7 @@ client.on('interactionCreate', async interaction => {
                 .slice(0, 10);
 
             if (sortedUsers.length === 0) {
-                return interaction.reply({ content: "🏆 No global scores recorded yet! Run `/quiz` to start playing.", flags: 64 });
+                return await interaction.reply({ content: "🏆 No global scores recorded yet! Run `/quiz` to start playing.", flags: 64 }).catch(() => {});
             }
 
             let description = sortedUsers.map(([id, data], index) => {
@@ -296,9 +266,9 @@ client.on('interactionCreate', async interaction => {
                 .setDescription(description)
                 .setFooter({ text: 'Top players across all Discord servers!' });
 
-            return interaction.reply({ embeds: [globalEmbed] });
+            return await interaction.reply({ embeds: [globalEmbed] }).catch(() => {});
         }
-
+        
         if (commandName === 'quiz') {
             // Prevent multiple overlapping quizzes in the same channel
             if (global.activeQuizChannels && global.activeQuizChannels.has(interaction.channelId)) {
@@ -585,25 +555,31 @@ client.on('interactionCreate', async interaction => {
                 const eligibleWinners = sortedMatchPlayers.filter(([userId, data]) => data.score >= SCORE_THRESHOLD);
 
                 if (eligibleWinners.length > 0) {
+                    let invDb = { users: {} };
+                    if (fs.existsSync(INVENTORY_FILE)) {
+                        invDb = JSON.parse(fs.readFileSync(INVENTORY_FILE, 'utf8'));
+                    }
+
                     for (const [winnerId, winnerData] of eligibleWinners) {
-                        const packRow = new ActionRowBuilder().addComponents(
-                            new ButtonBuilder()
-                                .setCustomId(`open_pack_${winnerId}`)
-                                .setLabel('🎁 Open Pack Now')
-                                .setStyle(ButtonStyle.Success),
-                            new ButtonBuilder()
-                                .setCustomId(`save_pack_${winnerId}`)
-                                .setLabel('🎒 Save for Later')
-                                .setStyle(ButtonStyle.Secondary)
-                        );
+                        if (!invDb.users[winnerId]) {
+                            invDb.users[winnerId] = { coins: 0, inventory: [], unopened_packs: 0 };
+                        }
+                        if (!invDb.users[winnerId].unopened_packs) {
+                            invDb.users[winnerId].unopened_packs = 0;
+                        }
+
+                        // Automatically add pack to inventory
+                        invDb.users[winnerId].unopened_packs += 1;
 
                         const packEmbed = new EmbedBuilder()
                             .setColor(0x00FFCC)
-                            .setTitle('🎁 Match Reward Unlocked!')
-                            .setDescription(`Congratulations <@${winnerId}>! You scored **${winnerData.score} points** (meeting the threshold) and earned **1x Cricket Player Pack**.`);
+                            .setTitle('🎁 Match Reward Automatically Saved!')
+                            .setDescription(`Congratulations <@${winnerId}>! You scored **${winnerData.score} points** (meeting the threshold).\n\n🎒 **1x Cricket Player Pack** has been automatically saved to your inventory! Use \`/inventory\` to open it anytime.`);
 
-                        await interaction.channel.send({ content: `<@${winnerId}>`, embeds: [packEmbed], components: [packRow] });
+                        await interaction.channel.send({ content: `<@${winnerId}>`, embeds: [packEmbed] });
                     }
+
+                    fs.writeFileSync(INVENTORY_FILE, JSON.stringify(invDb, null, 2));
                 }
             } finally {
                 // Always release the channel lock when finished
